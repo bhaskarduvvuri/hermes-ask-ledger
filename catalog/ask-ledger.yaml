@@ -1,0 +1,22 @@
+name: ask-ledger
+version: "0.1.0"
+repo: https://github.com/bhaskarduvvuri/hermes-ask-ledger
+sha: <40-hex commit of the publish branch>
+subdir: plugin
+title: Ask Ledger
+description: "Keeps a durable ledger of what you asked the agent: each message becomes an ask (A1, A2 ...) with a state (open, in progress, needs you, answered, closed), the agent updates states with ask_update, unresolved asks are reminded to the agent every turn across restarts and compaction, and /asks plus a static no-JavaScript page show where everything stands. Disclosure — stores your messages (trimmed, common secret shapes redacted) in plaintext under HERMES_HOME/plugin-data/ask-ledger/, append-only and never pruned; injects up to 5 lines of your unresolved asks into each turn's user message, so they reach your model provider; an optional ntfy push (off by default, https only) sends only a count and the page link; no shell commands, no reads outside its data folder, no telemetry."
+maintainer: bhaskarduvvuri
+tier: community
+category: tools
+requires_hermes: ">=0.22.6"
+docs_url: https://github.com/bhaskarduvvuri/hermes-ask-ledger#readme
+platforms: [linux, macos]
+capabilities:
+  provides_tools:
+    - ask_update
+    - ask_list
+  provides_hooks:
+    - pre_llm_call
+    - post_gateway_admission
+  provides_middleware: []
+  requires_env: []
