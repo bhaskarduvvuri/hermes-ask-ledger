@@ -5,7 +5,7 @@ api_version: 1
 description: Durable ledger of what you asked the agent, with reminders, a /asks view and a static page
 license: MIT
 requires_hermes: ">=0.22.6"
-provides_tools: [ask_update, ask_list, todo_add, todo_update, todo_suggest, todo_list]
+provides_tools: [ask_update, ask_list, todo_add, todo_update, todo_suggest, todo_items]
 provides_hooks: [pre_llm_call, post_gateway_admission, transform_llm_output]
 tags: [productivity, memory]
 config_schema:

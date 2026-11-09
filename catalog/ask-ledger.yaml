@@ -18,7 +18,7 @@ capabilities:
     - todo_add
     - todo_update
     - todo_suggest
-    - todo_list
+    - todo_items
   provides_hooks:
     - pre_llm_call
     - post_gateway_admission

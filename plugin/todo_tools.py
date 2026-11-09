@@ -15,7 +15,7 @@ SCHEMAS = [
     schema('todo_add', 'Add only explicit commitments the user stated, never hypotheticals or quoted text. Add one todo per commitment. Reuse a category from the list, otherwise coin one short word. It will be marked added by agent.', {'text':'string','category':'string','due':'string','at_user_request':'boolean','user_words':'string'}, ['text']),
     schema('todo_update', 'File or update a todo only with the user words from this turn.', {'id':'string','category':'string','due':'string','state':'string','snooze':'string','suggestion':'string','user_words':'string'}, ['id']),
     schema('todo_suggest', 'Offer done or drop for an apparently finished item.', {'id':'string','action':'string'}, ['id','action']),
-    schema('todo_list', 'List the user open todo items as data, optionally including snoozed items.', {'include_snoozed':'boolean'}),
+    schema('todo_items', "The user's own todo items from the ask ledger (not your task list): List the user open todo items as data, optionally including snoozed items.", {'include_snoozed':'boolean'}),
 ]
 
 def clock(kwargs):
@@ -38,7 +38,7 @@ def handle(plugin, name, args, **kwargs):
             try: due = resolve_due(args['due'], now, tz) if args.get('due') else ''
             except (ValueError, TypeError): return json.dumps({'ok': False, 'message': 'Due is today, tomorrow or YYYY-MM-DD'})
             result = log.add_todo(sender, args.get('text', ''), origin='user' if args.get('at_user_request') and TodoLog._consented_words(args.get('user_words'), state.get('consent_message')) else 'agent', category=args.get('category', ''), due=due, turn_key=state['turn'], agent_adds=plugin._cfg('agent_adds', True), **common)
-        elif name == 'todo_list':
+        elif name == 'todo_items':
             items = fold(log.read().events)
             visible = [i for i in items.values() if i.sender == sender and _open(i)] if args.get('include_snoozed') else open_items(items, sender, now, tz)
             result = {'items': [dict(id=i.id, text=clean(i.text), category=clean(i.category), due=i.due, snooze_until=i.snooze_until) for i in visible]}

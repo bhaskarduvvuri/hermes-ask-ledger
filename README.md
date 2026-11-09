@@ -138,7 +138,7 @@ chats that do not pass plugin commands through. On a gateway where
 `drop` to `user_allowed_commands` so other users can run them.
 
 The agent uses `ask_update(id, state, answer_line)`, `ask_list()`, and
-`todo_add`, `todo_update`, `todo_suggest`, `todo_list`.
+`todo_add`, `todo_update`, `todo_suggest`, `todo_items`.
 
 ## Settings
 
@@ -152,7 +152,7 @@ plugin settings form:
 | `page_url` | empty | URL to show for the page if you serve it; default is the local file |
 | `ntfy_url` | empty | `https://` ntfy topic URL; empty means no notifications |
 | `agent_adds` | `true` | Let the agent add todos when you commit to something (at most 2 a turn, 10 a day) |
-| `board` | `true` | Keep one "Open todos" message in each chat, edited in place as the list changes |
+| `board` | `true` | Keep one "Open todos" message in each chat, edited in place as the list changes (needs the default in-process plugin mode; with `plugins.isolation: host` it stays off) |
 | `trusted_chats` | empty | Shared chats allowed to show todo text, as `platform:chat_id` (for example a household group) |
 
 ## What it stores and sends (disclosure)
