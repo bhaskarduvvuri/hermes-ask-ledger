@@ -10,6 +10,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from plugin import setup
 from tests.fake_ctx import FakeCtx
@@ -62,6 +63,25 @@ class FailClosedTest(unittest.TestCase):
         self.turn("g")
         self.assertFalse(self.p._turns["g"]["private"])
         self.assertNotIn("passport", self.p.on_output("ok", "g", platform="telegram", now=NOW) or "")
+
+
+    def test_untaken_admission_of_any_age_makes_the_next_one_shared(self):
+        clock = [1000.0]
+        with mock.patch("plugin.time.monotonic", lambda: clock[0]):
+            self.admit("group", "g")
+            clock[0] += 10_000  # far longer than any turn window; the group turn is delayed
+            self.admit("dm", "d")
+            clock[0] += 1
+            self.turn("g")  # the delayed group turn takes the newest admission
+        self.assertFalse(self.p._turns["g"]["private"])
+        self.assertNotIn("passport", self.p.on_output("ok", "g", platform="telegram", now=NOW) or "")
+
+    def test_a_taken_group_admission_does_not_spoil_a_later_dm(self):
+        self.admit("group", "g")
+        self.turn("g")
+        self.admit("dm", "d")
+        self.turn("d")
+        self.assertTrue(self.p._turns["d"]["private"])
 
 
 if __name__ == "__main__":

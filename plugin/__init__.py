@@ -32,6 +32,12 @@ PLUGIN_NAME = "ask-ledger"
 LOCAL_PLATFORMS = {"", "cli", "tui", "desktop", "local"}
 # An admitted message's agent turn normally starts within seconds; past this, don't assume a match.
 ADMISSION_TURN_WINDOW_S = 600
+
+
+def _chat_key(chat_type, chat_id):
+    """A chat is its id; without an id its type stands in, so two id-less chats of different
+    types still count as two, and an unknown chat never matches a known one."""
+    return ("id", chat_id) if chat_id is not None else ("type", chat_type)
 USAGE = ("Usage: /asks [all] | /asks close <id> | /asks private <id> | /asks public <id> "
          "| /asks page")
 
@@ -65,7 +71,6 @@ class AskLedgerPlugin:
         self._data_dir = data_dir
         self._senders: Dict[str, str] = {}  # session_id -> sender_id, learned from turns
         self._admitted: Dict[str, tuple] = {}  # sender -> (ask id, monotonic time, chat type, chat id) awaiting its turn
-        self._recent_chats: Dict[str, list] = {}  # sender -> [(monotonic time, chat type, chat id)] within the turn window
         self._lock = threading.Lock()
         self._turns = {}
         self._boards = {}
@@ -255,11 +260,16 @@ class AskLedgerPlugin:
             if not user_id:
                 return None
             admitted_at = time.monotonic()
+            chat_type, chat_id = source.get("chat_type"), source.get("chat_id")
             with self._lock:
-                self._admitted[user_id] = ("", admitted_at, source.get("chat_type"), source.get("chat_id"))
-                recent = [r for r in self._recent_chats.get(user_id, [])
-                          if admitted_at - r[0] < ADMISSION_TURN_WINDOW_S]
-                self._recent_chats[user_id] = recent + [(admitted_at, source.get("chat_type"), source.get("chat_id"))]
+                # Hermes gives this hook no way to tie an admission to the turn's session, so an
+                # admission is held per sender. If it replaces one from another chat that no turn has
+                # taken yet (of any age), the next turn could belong to either chat: its chat is then
+                # unknown, which counts as shared (fail closed).
+                pending = self._admitted.get(user_id)
+                if pending is not None and _chat_key(pending[2], pending[3]) != _chat_key(chat_type, chat_id):
+                    chat_type, chat_id = None, None
+                self._admitted[user_id] = ("", admitted_at, chat_type, chat_id)
             if not isinstance(text, str) or not text.strip() or text.strip().startswith("/"):
                 return None  # nothing to capture, or a command
             if looks_machine_written(text):
@@ -268,24 +278,15 @@ class AskLedgerPlugin:
                                     platform=platform)
             with self._lock:
                 if self._admitted.get(user_id, (None, None))[1] == admitted_at:
-                    self._admitted[user_id] = (ask.id, admitted_at, source.get("chat_type"), source.get("chat_id"))
+                    self._admitted[user_id] = (ask.id, admitted_at, chat_type, chat_id)
         except Exception as e:
             logger.warning("ask-ledger: post_gateway_admission failed, continuing: %s", e)
         return None
 
     def _take_admitted(self, sender: str):
-        now = time.monotonic()
         with self._lock:
             admitted = self._admitted.pop(sender, None)
-            # A chat is its id; without an id, its type stands in, so two id-less chats of
-            # different types still count as two.
-            chats = {r[2] if r[2] is not None else ("type", r[1]) for r in self._recent_chats.get(sender, [])
-                     if now - r[0] < ADMISSION_TURN_WINDOW_S}
-        if admitted and now - admitted[1] < ADMISSION_TURN_WINDOW_S:
-            if len(chats) > 1:
-                # The same person wrote in two chats within the window: this turn could belong to
-                # either, so its chat is unknown, which counts as shared (fail closed).
-                return admitted[0], None, None
+        if admitted and time.monotonic() - admitted[1] < ADMISSION_TURN_WINDOW_S:
             return admitted[0], admitted[2], admitted[3]
         return None
 
