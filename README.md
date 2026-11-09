@@ -75,8 +75,18 @@ On a shared gateway, every user sees and changes only their own asks and todos.
 In a group, channel or thread chat, everyone can read what the plugin adds, so
 there it shows counts only ("You have 1 todo due. /todos to see it."), posts no
 Open todos message, and asks the agent not to name your items. What you type
-yourself (`/todos`, `/asks`) still shows your own list. A chat whose type is
-unknown counts as shared.
+yourself (`/todos`, `/asks`) still shows your own list; other commands there
+name only the id ("Done: T3"). A chat whose type is unknown counts as shared.
+
+**Limit.** Hermes tells the plugin a message's chat when the message arrives, but
+not which arrival a later model turn belongs to. So the plugin treats a turn as
+private only when it carries a direct-message arrival that matches its session,
+and counts anything uncertain as shared: a turn with no arrival of its own, an
+arrival from a different chat than the session's, or anyone active in two chats
+within 10 minutes. One case is covered only inside that window: the very first
+turn of a brand-new session that arrives without its own message while the same
+person has a direct message waiting. A direct chat used right after a group may
+show counts only for up to 10 minutes.
 
 ## Install
 

@@ -65,5 +65,38 @@ class CommandRepliesTest(unittest.TestCase):
             self.assertNotIn(ch, reply)
 
 
+class SharedChatRepliesTest(unittest.TestCase):
+    """In a shared chat, a command's reply names the id only: the item's text stays private."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.ctx = FakeCtx()
+        self.ctx.post_message = lambda text: SimpleNamespace(ok=True, edit=lambda t: {"ok": True})
+        data = Path(self.tmp.name)
+        setup(self.ctx, lambda: data)
+        dm = SimpleNamespace(user_id="alice", chat_id="d", chat_type="dm")
+        self.group = SimpleNamespace(user_id="alice", chat_id="g", chat_type="group")
+        self.ctx.run_command("todo", "add renew the passport | admin", session_id="d", platform="telegram",
+                             source=dm, now=NOW, tz=timezone.utc)
+
+    def in_group(self, name, raw=""):
+        return self.ctx.run_command(name, raw, session_id="g", platform="telegram", source=self.group,
+                                    now=NOW, tz=timezone.utc)
+
+    def test_done_in_a_group_names_the_id_only(self):
+        self.assertEqual("Done: T1", self.in_group("done", "T1"))
+
+    def test_snooze_in_a_group_names_the_id_and_time_only(self):
+        self.assertEqual("Snoozed T1 until tomorrow 08:00", self.in_group("snooze", "T1 tomorrow"))
+
+    def test_add_in_a_group_names_the_id_only(self):
+        self.assertEqual("Added T2, due today", self.in_group("todo", "add call the plumber | home | today"))
+
+    def test_no_source_on_a_messaging_platform_is_shared(self):
+        reply = self.ctx.run_command("done", "T1", session_id="d", platform="telegram", now=NOW, tz=timezone.utc)
+        self.assertNotIn("passport", reply)
+
+
 if __name__ == "__main__":
     unittest.main()

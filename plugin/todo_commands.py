@@ -12,9 +12,10 @@ def hint(events, sender, now):
     counts = action_counts(events, sender, now)['all_time']
     return HINTS[sum(counts.values()) % 3]
 
-def _reply(log, result, action, now, tz):
+def _reply(log, result, action, now, tz, private=False):
     """One plain line saying what changed, naming the item: 'Added T1 ...', 'Snoozed T1 ... until
-    08:00', 'Done: T1 ...'. A refusal is its reason alone."""
+    08:00', 'Done: T1 ...'. In a shared chat only the id: the item's text may have been written
+    in a private chat. A refusal is its reason alone."""
     if not result.get('ok'):
         return clean(result.get('message', ''))
     item = fold(log.read().events).get(result.get('id'))
@@ -36,6 +37,8 @@ def _reply(log, result, action, now, tz):
         prefix = 'Unsnoozed '
     else:
         prefix = 'Dropped: ' if action == 'drop' else 'Done: '
+    if not private:
+        return clean(prefix + item.id) + suffix
     return clean(prefix + item.id + ' ' + item.text, 80 - len(suffix)) + suffix
 
 def command(plugin, name, raw='', *, session_id='', platform='', source=None, **kwargs):
@@ -46,6 +49,9 @@ def command(plugin, name, raw='', *, session_id='', platform='', source=None, **
             if platform.lower() not in LOCAL_PLATFORMS: return "Ask Ledger can't tell who you are in this chat yet; send a message first."
             sender = ''
         now, tz = clock(kwargs); log = TodoLog(plugin._data_dir()); words = raw.split()
+        # This command's own chat: private only on a local surface, a dm or a trusted chat.
+        chat_private = (plugin._private_chat(platform, getattr(source, 'chat_type', None), getattr(source, 'chat_id', None))
+                   if source is not None else platform.lower() in LOCAL_PLATFORMS)
         # A typed command is a new action every time (it runs outside model turns, so a turn id
         # cannot tell two of them apart): a fresh request id, never a replay of an earlier one.
         common = dict(request_id=request(), now=now, tz=tz)
@@ -57,7 +63,7 @@ def command(plugin, name, raw='', *, session_id='', platform='', source=None, **
             try: due = resolve_due(parts[2], now, tz) if len(parts) > 2 and parts[2] else ''
             except (ValueError, TypeError): return 'Due is today, tomorrow or YYYY-MM-DD'
             result = log.add_todo(sender, parts[0], origin='user', category=category, due=due, **common)
-            return _reply(log, result, 'add', now, tz)
+            return _reply(log, result, 'add', now, tz, chat_private)
         if name in ('done', 'drop', 'snooze'):
             if not words or len(words) > (2 if name == 'snooze' else 1): return clean('Usage: /' + name + ' id' + (' time' if name == 'snooze' else ''))
             action = name; until = None
@@ -71,7 +77,7 @@ def command(plugin, name, raw='', *, session_id='', platform='', source=None, **
                 except (ValueError, TypeError): return 'Choose 1h, tonight, tomorrow, a date or HH:MM'
                 if until is None: action = 'clear_snooze'
             result = log.apply_action(sender, words[0], action, by='user', how='command', snooze_until=until, **common)
-            return _reply(log, result, action, now, tz)
+            return _reply(log, result, action, now, tz, chat_private)
         read = log.read(); items = fold(read.events)
         if words == ['stats']:
             counts = action_counts(read.events, sender, now)
@@ -100,7 +106,7 @@ def command(plugin, name, raw='', *, session_id='', platform='', source=None, **
                     until = resolve_snooze({'1 hour':'1h', 'This evening':'tonight', 'Tomorrow':'tomorrow'}[when], now, tz)
                 common['request_id'] = request()
                 result = log.apply_action(sender, item.id, choice.lower(), by='user', how='button', rev=item.rev, snooze_until=until, **common)
-                return _reply(log, result, choice.lower(), now, tz)
+                return _reply(log, result, choice.lower(), now, tz, chat_private)
         visible.sort(key=lambda i: (not bool(i.category), i.category, i.id))
         lines = []; previous = None
         shown = 0
