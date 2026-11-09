@@ -133,7 +133,8 @@ class TodoGroupsTest(unittest.TestCase):
         self.turn(session='bob', user='bob')
         self.assertFalse(self.p._turns['bob']['private'])
         self.ctx.fire('pre_llm_call', session_id='s', platform='telegram', sender_id='alice', turn_id='wake', user_message='', now=NOW)
-        self.assertTrue(self.p._turns['s']['private'])
+        # A wake turn carries no admission of its own, so on a messaging chat it is shared.
+        self.assertFalse(self.p._turns['s']['private'])
 
     def test_shared_related_only_has_no_line(self):
         TodoLog(self.tmp.name).add_todo('alice', 'secret task', origin='user', request_id='related', now=NOW, tz=timezone.utc)

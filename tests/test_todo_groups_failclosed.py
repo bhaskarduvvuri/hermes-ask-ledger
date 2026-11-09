@@ -76,12 +76,35 @@ class FailClosedTest(unittest.TestCase):
         self.assertFalse(self.p._turns["g"]["private"])
         self.assertNotIn("passport", self.p.on_output("ok", "g", platform="telegram", now=NOW) or "")
 
-    def test_a_taken_group_admission_does_not_spoil_a_later_dm(self):
-        self.admit("group", "g")
-        self.turn("g")
+    def test_a_dm_right_after_a_group_is_shared_until_the_window_passes(self):
+        clock = [1000.0]
+        with mock.patch("plugin.time.monotonic", lambda: clock[0]):
+            self.admit("group", "g")
+            self.turn("g")
+            self.admit("dm", "d")
+            self.turn("d")
+            self.assertFalse(self.p._turns["d"]["private"])  # two chats in the window: fail closed
+            clock[0] += 10_000
+            self.admit("dm", "d")
+            self.turn("d")
+            self.assertTrue(self.p._turns["d"]["private"])
+
+    def test_a_group_turn_without_its_own_admission_never_takes_a_dm_admission(self):
+        clock = [1000.0]
+        with mock.patch("plugin.time.monotonic", lambda: clock[0]):
+            self.admit("group", "g")
+            self.turn("g")  # the group session is now known
+            clock[0] += 10_000  # long after: the window check alone would not catch it
+            self.admit("dm", "d")  # the DM's admission is pending
+            self.turn("g", message="any news on the passport")  # a group turn with no admission of its own
+        self.assertFalse(self.p._turns["g"]["private"])
+        self.assertNotIn("passport", self.p.on_output("ok", "g", platform="telegram", now=NOW) or "")
+
+    def test_a_turn_in_an_unseen_session_without_admission_is_shared(self):
         self.admit("dm", "d")
         self.turn("d")
-        self.assertTrue(self.p._turns["d"]["private"])
+        self.turn("other", message="hello")
+        self.assertFalse(self.p._turns["other"]["private"])
 
 
 if __name__ == "__main__":

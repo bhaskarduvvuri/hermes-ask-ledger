@@ -1,7 +1,7 @@
 """User commands for the todo ledger."""
 from datetime import timedelta
 from .todo_log import TodoLog
-from .todo_model import fold, open_items, snoozed_count, action_counts, resolve_due, resolve_snooze
+from .todo_model import fold, open_items, snoozed_count, action_counts, resolve_due, resolve_snooze, instant
 from .todo_tools import clock, request
 from .todo_lines import clean
 from .topics import guess_topic
@@ -11,6 +11,32 @@ HINTS = ('or just say "remind me after lunch"', 'or just say "done"', 'or just s
 def hint(events, sender, now):
     counts = action_counts(events, sender, now)['all_time']
     return HINTS[sum(counts.values()) % 3]
+
+def _reply(log, result, action, now, tz):
+    """One plain line saying what changed, naming the item: 'Added T1 ...', 'Snoozed T1 ... until
+    08:00', 'Done: T1 ...'. A refusal is its reason alone."""
+    if not result.get('ok'):
+        return clean(result.get('message', ''))
+    item = fold(log.read().events).get(result.get('id'))
+    if item is None:
+        return clean(result.get('message', ''))
+    suffix = ''
+    if action == 'add':
+        prefix = 'Added '
+        if item.due:
+            today = now.astimezone(tz).date()
+            suffix = ', due ' + ('today' if item.due == today.isoformat() else
+                                 'tomorrow' if item.due == (today + timedelta(days=1)).isoformat() else item.due)
+    elif action == 'snooze':
+        prefix = 'Snoozed '
+        until = instant(item.snooze_until).astimezone(tz)
+        days = (until.date() - now.astimezone(tz).date()).days
+        suffix = ' until ' + ('' if days == 0 else 'tomorrow ' if days == 1 else until.date().isoformat() + ' ') + until.strftime('%H:%M')
+    elif action == 'clear_snooze':
+        prefix = 'Unsnoozed '
+    else:
+        prefix = 'Dropped: ' if action == 'drop' else 'Done: '
+    return clean(prefix + item.id + ' ' + item.text, 80 - len(suffix)) + suffix
 
 def command(plugin, name, raw='', *, session_id='', platform='', source=None, **kwargs):
     try:
@@ -31,7 +57,7 @@ def command(plugin, name, raw='', *, session_id='', platform='', source=None, **
             try: due = resolve_due(parts[2], now, tz) if len(parts) > 2 and parts[2] else ''
             except (ValueError, TypeError): return 'Due is today, tomorrow or YYYY-MM-DD'
             result = log.add_todo(sender, parts[0], origin='user', category=category, due=due, **common)
-            return clean((result['id'] + ' ' if result['id'] else '') + result['message'])
+            return _reply(log, result, 'add', now, tz)
         if name in ('done', 'drop', 'snooze'):
             if not words or len(words) > (2 if name == 'snooze' else 1): return clean('Usage: /' + name + ' id' + (' time' if name == 'snooze' else ''))
             action = name; until = None
@@ -45,7 +71,7 @@ def command(plugin, name, raw='', *, session_id='', platform='', source=None, **
                 except (ValueError, TypeError): return 'Choose 1h, tonight, tomorrow, a date or HH:MM'
                 if until is None: action = 'clear_snooze'
             result = log.apply_action(sender, words[0], action, by='user', how='command', snooze_until=until, **common)
-            return clean((result['id'] + ' ' if result['id'] else '') + result['message'])
+            return _reply(log, result, action, now, tz)
         read = log.read(); items = fold(read.events)
         if words == ['stats']:
             counts = action_counts(read.events, sender, now)
@@ -74,7 +100,7 @@ def command(plugin, name, raw='', *, session_id='', platform='', source=None, **
                     until = resolve_snooze({'1 hour':'1h', 'This evening':'tonight', 'Tomorrow':'tomorrow'}[when], now, tz)
                 common['request_id'] = request()
                 result = log.apply_action(sender, item.id, choice.lower(), by='user', how='button', rev=item.rev, snooze_until=until, **common)
-                return clean((result['id'] + ' ' if result['id'] else '') + result['message'])
+                return _reply(log, result, choice.lower(), now, tz)
         visible.sort(key=lambda i: (not bool(i.category), i.category, i.id))
         lines = []; previous = None
         shown = 0

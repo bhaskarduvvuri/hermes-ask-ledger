@@ -71,6 +71,8 @@ class AskLedgerPlugin:
         self._data_dir = data_dir
         self._senders: Dict[str, str] = {}  # session_id -> sender_id, learned from turns
         self._admitted: Dict[str, tuple] = {}  # sender -> (ask id, monotonic time, chat type, chat id) awaiting its turn
+        self._recent_chats: Dict[str, list] = {}  # sender -> [(monotonic time, chat key)] within the turn window
+        self._session_chats: Dict[str, tuple] = {}  # session id -> chat key, learned from an unambiguous admission
         self._lock = threading.Lock()
         self._turns = {}
         self._boards = {}
@@ -121,7 +123,7 @@ class AskLedgerPlugin:
                 session = str(kwargs.get("session_id") or "")
                 old = self._turns.pop(session, None)
                 if old and not extract_text(kwargs.get("user_message")):
-                    self._turns[session] = {"sender": old["sender"], "turn": str(kwargs.get("turn_id") or ""), "message": "", "shown": [], "selected": [], "private": old.get("private", False), "chat_type": old.get("chat_type"), "chat_id": old.get("chat_id"), "platform": old.get("platform", "") }
+                    self._turns[session] = {"sender": old["sender"], "turn": str(kwargs.get("turn_id") or ""), "message": "", "shown": [], "selected": [], "private": old.get("platform", "").lower() in LOCAL_PLATFORMS, "chat_type": None, "chat_id": None, "platform": old.get("platform", "") }
                     block = self._todo_block("", session, **kwargs)
                     return {"context": block} if block else None
                 return None
@@ -135,11 +137,17 @@ class AskLedgerPlugin:
                 with self._lock:
                     self._senders[session] = sender
             turn = str(kwargs.get("turn_id") or "")
-            old = self._turns.get(session, {})
             admission = self._take_admitted(sender) if platform.lower() not in LOCAL_PLATFORMS else None
+            # Private only on a local surface, a trusted chat, or a turn that took a dm admission.
+            # A turn with no admission is shared. The session binding can only make a turn MORE
+            # shared: an admission whose chat differs from the one this session was first seen in
+            # was not this turn's own, so its chat is unknown.
             chat_type, chat_id = (admission[1], admission[2]) if admission else (None, None)
-            if not admission and not extract_text(kwargs.get("user_message")) and old.get("sender") == sender:
-                chat_type, chat_id = old.get("chat_type"), old.get("chat_id")
+            if admission and session and (chat_type is not None or chat_id is not None):
+                with self._lock:
+                    known = self._session_chats.setdefault(session, _chat_key(chat_type, chat_id))
+                if known != _chat_key(chat_type, chat_id):
+                    chat_type, chat_id = None, None
             private = self._private_chat(platform, chat_type, chat_id)
             self._turns[session] = {"sender": sender, "turn": turn, "message": redact(extract_text(kwargs.get("user_message"))), "shown": [], "selected": [], "private": private, "chat_type": chat_type, "chat_id": chat_id, "platform": platform}
             ledger = self.ledger()
@@ -269,6 +277,10 @@ class AskLedgerPlugin:
                 pending = self._admitted.get(user_id)
                 if pending is not None and _chat_key(pending[2], pending[3]) != _chat_key(chat_type, chat_id):
                     chat_type, chat_id = None, None
+                # Every chat this sender used recently, admissions taken or not (for the window check).
+                recent = [r for r in self._recent_chats.get(user_id, [])
+                          if admitted_at - r[0] < ADMISSION_TURN_WINDOW_S]
+                self._recent_chats[user_id] = recent + [(admitted_at, _chat_key(source.get("chat_type"), source.get("chat_id")))]
                 self._admitted[user_id] = ("", admitted_at, chat_type, chat_id)
             if not isinstance(text, str) or not text.strip() or text.strip().startswith("/"):
                 return None  # nothing to capture, or a command
@@ -284,9 +296,15 @@ class AskLedgerPlugin:
         return None
 
     def _take_admitted(self, sender: str):
+        now = time.monotonic()
         with self._lock:
             admitted = self._admitted.pop(sender, None)
-        if admitted and time.monotonic() - admitted[1] < ADMISSION_TURN_WINDOW_S:
+            chats = {key for at, key in self._recent_chats.get(sender, []) if now - at < ADMISSION_TURN_WINDOW_S}
+        if admitted and now - admitted[1] < ADMISSION_TURN_WINDOW_S:
+            if len(chats) > 1:
+                # The sender used more than one chat within the window: which one this turn belongs
+                # to is not certain, so its chat is unknown, which counts as shared (fail closed).
+                return admitted[0], None, None
             return admitted[0], admitted[2], admitted[3]
         return None
 
