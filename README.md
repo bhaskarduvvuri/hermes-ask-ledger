@@ -31,6 +31,8 @@ open. Ask Ledger does something narrower and combines three things:
   not only at session start, and they are read from the ledger file, so they
   survive restarts and compaction.
 
+Not an audit of the agent's tool calls: it tracks what you asked and promised.
+
 ## What it does
 
 - **Capture.** Each message you send becomes an ask: `A1`, `A2`, … with the

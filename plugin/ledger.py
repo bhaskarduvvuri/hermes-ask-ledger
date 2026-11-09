@@ -51,9 +51,13 @@ class Ask:
     answer: str = ""
     private: bool = False
     updated: str = ""
+    reason: str = ""
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        result = asdict(self)
+        if not self.reason:
+            result.pop("reason")
+        return result
 
 
 def now_iso() -> str:
@@ -110,6 +114,15 @@ class Ledger:
     @staticmethod
     def _apply(asks: Dict[str, Ask], ev: dict) -> None:
         op, aid = ev.get("op"), ev.get("id")
+        if op in ("todo_new", "filed", "promoted", "snoozed", "closed", "suggested", "suggestion_answered", "surfaced", "request_result"):
+            from .todo_log import checksum
+            if not ev.get("request_id") or ev.get("ck") != checksum(ev):
+                raise ValueError("bad checksum")
+            if op == "closed" and aid in asks:
+                cur = asks[aid]
+                reason = str(ev.get("reason", ""))
+                asks[aid] = replace(cur, state="closed", reason=reason, answer=reason, updated=str(ev.get("ts", cur.updated)))
+            return
         if op == "new":
             if aid in asks or not _ID_RE.match(str(aid)):
                 raise ValueError("bad new")
@@ -170,8 +183,8 @@ class Ledger:
         return _Lock()
 
     def _append(self, ev: dict) -> None:
-        ev = {"v": SCHEMA, **ev}
-        data = (json.dumps(ev, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+        events = ev if isinstance(ev, list) else [ev]
+        data = "".join(json.dumps({"v": SCHEMA, **event}, ensure_ascii=False, separators=(",", ":")) + "\n" for event in events).encode("utf-8")
         # A torn last line (crash mid-write) must not swallow the next event.
         try:
             with open(self.path, "rb") as f:
