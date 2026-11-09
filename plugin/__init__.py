@@ -65,6 +65,7 @@ class AskLedgerPlugin:
         self._data_dir = data_dir
         self._senders: Dict[str, str] = {}  # session_id -> sender_id, learned from turns
         self._admitted: Dict[str, tuple] = {}  # sender -> (ask id, monotonic time, chat type, chat id) awaiting its turn
+        self._recent_chats: Dict[str, list] = {}  # sender -> [(monotonic time, chat type, chat id)] within the turn window
         self._lock = threading.Lock()
         self._turns = {}
         self._boards = {}
@@ -174,12 +175,20 @@ class AskLedgerPlugin:
         state['selected'] = selected
         state['shown'] = [i.id for kind, obj, score in selected for i in (obj if isinstance(obj, list) else [obj])]
         lines = ['Todo data:']
-        for kind, obj, score in selected:
-            for item in (obj if isinstance(obj, list) else [obj]):
-                data = todo_lines.clean(item.id + ' ' + item.text.replace('"', "'"), 71)
-                lines.append('Data: "' + data + '"')
-        categories = categories_in_use(items, state['sender'])
-        if categories: lines.append(todo_lines.clean('Categories: ' + ', '.join(k + ' ' + str(v) for k, v in sorted(categories.items()))))
+        if state.get('private', False):
+            for kind, obj, score in selected:
+                for item in (obj if isinstance(obj, list) else [obj]):
+                    data = todo_lines.clean(item.id + ' ' + item.text.replace('"', "'"), 71)
+                    lines.append('Data: "' + data + '"')
+            categories = categories_in_use(items, state['sender'])
+            if categories: lines.append(todo_lines.clean('Categories: ' + ', '.join(k + ' ' + str(v) for k, v in sorted(categories.items()))))
+        else:
+            # A shared chat: no item text or category names reach the model, so no reply can
+            # repeat them to the group. A count at most.
+            due = len({i.id for kind, obj, score in selected if kind != 'related'
+                       for i in (obj if isinstance(obj, list) else [obj])})
+            if due:
+                lines.append('The user has ' + str(due) + (' todo due.' if due == 1 else ' todos due.'))
         for suggestion in pending_suggestions(items, state['sender'], now):
             lines.append(todo_lines.clean("Waiting for the user's answer: done or drop " + suggestion['id'] + '?'))
         lines.extend(['Use todo_add for commitments the user states.',
@@ -203,7 +212,7 @@ class AskLedgerPlugin:
                 for kind, obj, score in state['selected']:
                     items = [current[i.id] for i in (obj if isinstance(obj, list) else [obj]) if i.id in current]
                     if not items: continue
-                    if not state.get('private', True):
+                    if not state.get('private', False):
                         if kind == 'related': continue
                         shared_count += len(items)
                         for item in items:
@@ -220,10 +229,10 @@ class AskLedgerPlugin:
                     lines.append(line)
                     for item in items:
                         log._append(dict(op='surfaced', id=item.id, sender=state['sender'], kind=kind, score=score, session_id=session_id, ts=now.isoformat(), request_id=todo_tools.request()))
-            if not state.get('private', True) and shared_count:
+            if not state.get('private', False) and shared_count:
                 lines.append('You have ' + str(shared_count) + (' todo due. /todos to see it.' if shared_count == 1 else ' todos due. /todos to see them.'))
             if not lines: return None
-            if state.get('private', True): lines.append(todo_commands.hint(read.events, state['sender'], now))
+            if state.get('private', False): lines.append(todo_commands.hint(read.events, state['sender'], now))
             state['selected'] = []
             return response_text + '\n\n' + '\n'.join(lines)
         except Exception as e:
@@ -248,6 +257,9 @@ class AskLedgerPlugin:
             admitted_at = time.monotonic()
             with self._lock:
                 self._admitted[user_id] = ("", admitted_at, source.get("chat_type"), source.get("chat_id"))
+                recent = [r for r in self._recent_chats.get(user_id, [])
+                          if admitted_at - r[0] < ADMISSION_TURN_WINDOW_S]
+                self._recent_chats[user_id] = recent + [(admitted_at, source.get("chat_type"), source.get("chat_id"))]
             if not isinstance(text, str) or not text.strip() or text.strip().startswith("/"):
                 return None  # nothing to capture, or a command
             if looks_machine_written(text):
@@ -262,9 +274,18 @@ class AskLedgerPlugin:
         return None
 
     def _take_admitted(self, sender: str):
+        now = time.monotonic()
         with self._lock:
             admitted = self._admitted.pop(sender, None)
-        if admitted and time.monotonic() - admitted[1] < ADMISSION_TURN_WINDOW_S:
+            # A chat is its id; without an id, its type stands in, so two id-less chats of
+            # different types still count as two.
+            chats = {r[2] if r[2] is not None else ("type", r[1]) for r in self._recent_chats.get(sender, [])
+                     if now - r[0] < ADMISSION_TURN_WINDOW_S}
+        if admitted and now - admitted[1] < ADMISSION_TURN_WINDOW_S:
+            if len(chats) > 1:
+                # The same person wrote in two chats within the window: this turn could belong to
+                # either, so its chat is unknown, which counts as shared (fail closed).
+                return admitted[0], None, None
             return admitted[0], admitted[2], admitted[3]
         return None
 
