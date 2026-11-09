@@ -67,6 +67,9 @@ Not an audit of the agent's tool calls: it tracks what you asked and promised.
   plain lines under the agent's reply: a todo related to what you are talking
   about, and what is due. A due item is shown in full once, then as a short
   "Still due" at most every 30 minutes, until you snooze it or finish it.
+- **Open todos message.** One plain message per chat lists your open todos and
+  is edited in place as they change (on chats that cannot edit messages, a new
+  one is sent). It ends with "/todos to snooze or finish".
 
 On a shared gateway, every user sees and changes only their own asks and todos.
 
@@ -108,7 +111,7 @@ Then start a session and ask something. `/asks` shows the ledger.
 | `/asks page` | The page's location |
 
 | `/todo add <text> \| <category> \| <due>` | Add a todo; category and due (`today`, `tomorrow`, `YYYY-MM-DD`) are optional |
-| `/todos` | Your open todos by category, with the snoozed count |
+| `/todos` | Pick a todo, then Snooze, Done or Drop (buttons on Telegram, Discord and Slack; a numbered list elsewhere); where no picker can open, your open todos by category |
 | `/todos stats` | How often you snoozed and closed, by command, button or words (local only) |
 | `/snooze T4 [1h \| tonight \| tomorrow \| YYYY-MM-DD \| HH:MM \| now]` | Snooze; with no time you pick from a short list; `now` clears it |
 | `/done T4`, `/drop T4` | Finish or drop a todo or an ask |
@@ -133,6 +136,7 @@ plugin settings form:
 | `page_url` | empty | URL to show for the page if you serve it; default is the local file |
 | `ntfy_url` | empty | `https://` ntfy topic URL; empty means no notifications |
 | `agent_adds` | `true` | Let the agent add todos when you commit to something (at most 2 a turn, 10 a day) |
+| `board` | `true` | Keep one "Open todos" message in each chat, edited in place as the list changes |
 
 ## What it stores and sends (disclosure)
 

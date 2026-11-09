@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Callable, Dict, Optional, Tuple
 
-from . import notify, tools, todo_tools, todo_commands, todo_lines
+from . import notify, tools, todo_tools, todo_commands, todo_lines, todo_board
 from .todo_log import TodoLog
 from .todo_model import fold, open_items, categories_in_use, pending_suggestions
 from .redact import redact
@@ -67,6 +67,8 @@ class AskLedgerPlugin:
         self._admitted: Dict[str, Tuple[str, float]] = {}  # sender -> (ask id, monotonic time) awaiting its turn
         self._lock = threading.Lock()
         self._turns = {}
+        self._boards = {}
+        self._board_failed = set()
 
     # Helpers -------------------------------------------------------------
     def _cfg(self, key, default):
@@ -172,6 +174,7 @@ class AskLedgerPlugin:
     def on_output(self, response_text, session_id, model=None, platform=None, **kwargs):
         try:
             state = self._turns.get(str(session_id or ''))
+            if state: todo_board.refresh(self, session_id, state['sender'], **kwargs)
             if not state or not state['selected']: return None
             now, tz = todo_tools.clock(kwargs)
             log = TodoLog(self._data_dir()); read = log.read()
@@ -312,14 +315,46 @@ def setup(ctx, data_dir: Callable[[], Path] = _default_data_dir) -> AskLedgerPlu
     ctx.register_hook("pre_llm_call", p.on_turn)
     ctx.register_hook("post_gateway_admission", p.on_admission)
     ctx.register_hook("transform_llm_output", p.on_output)
+    def run_tool(name, args, **kw):
+        result = todo_tools.handle(p, name, args, **kw)
+        state = p._turns.get(str(kw.get('session_id') or ''))
+        if state: todo_board.refresh(p, kw.get('session_id'), state['sender'], **kw_without_session(kw))
+        return result
+    def run_command(name, raw, **kw):
+        result = todo_commands.command(p, name, raw, **kw)
+        sender = p._sender_for(kw.get('session_id', ''), kw.get('source'))
+        if sender is None and (kw.get('platform') or '').lower() in LOCAL_PLATFORMS: sender = ''
+        todo_board.refresh(p, kw.get('session_id'), sender, **kw_without_session(kw))
+        return result
+    def kw_without_session(kw):
+        return {k: v for k, v in kw.items() if k != 'session_id'}
     for schema in todo_tools.SCHEMAS:
         name = schema["name"]
-        ctx.register_tool(name=name, toolset="ask_ledger", schema=schema, handler=lambda args, _name=name, **kw: todo_tools.handle(p, _name, args, **kw))
-    for name in ("todo", "snooze", "done", "drop", "todos"):
-        ctx.register_command(name, lambda raw="", _name=name, **kw: todo_commands.command(p, _name, raw, **kw), description="Manage your todos", args_hint="id or options")
-    ctx.register_tool(name="ask_update", toolset="ask_ledger", schema=tools.ASK_UPDATE, handler=p.ask_update)
+        ctx.register_tool(name=name, toolset="ask_ledger", schema=schema, handler=lambda args, _name=name, **kw: run_tool(_name, args, **kw))
+    descriptions = {
+        'todo': ('Add a todo: /todo add text | category | due', 'add text | category | due'),
+        'todos': ('Your open todos, or /todos stats', '[stats]'),
+        'snooze': ('Snooze a todo or ask', 'id [time]'),
+        'done': ('Mark a todo or ask done', 'id'),
+        'drop': ('Drop a todo or ask', 'id'),
+    }
+    for name, (description, args_hint) in descriptions.items():
+        ctx.register_command(name, lambda raw='', _name=name, **kw: run_command(_name, raw, **kw), description=description, args_hint=args_hint)
+    def run_ask_update(args, **kw):
+        result = p.ask_update(args, **kw)
+        session = kw.get('session_id', '')
+        todo_board.refresh(p, session, p._sender_for(session), **kw_without_session(kw))
+        return result
+    def run_asks(raw='', **kw):
+        result = p.asks_command(raw, **kw)
+        session = kw.get('session_id', '')
+        sender = p._sender_for(session, kw.get('source'))
+        if sender is None and (kw.get('platform') or '').lower() in LOCAL_PLATFORMS: sender = ''
+        todo_board.refresh(p, session, sender, **kw_without_session(kw))
+        return result
+    ctx.register_tool(name="ask_update", toolset="ask_ledger", schema=tools.ASK_UPDATE, handler=run_ask_update)
     ctx.register_tool(name="ask_list", toolset="ask_ledger", schema=tools.ASK_LIST, handler=p.ask_list)
-    ctx.register_command("asks", p.asks_command, description="Show what you asked and where each stands",
+    ctx.register_command("asks", run_asks, description="Show what you asked and where each stands",
                          args_hint="[all|close <id>|private <id>|public <id>|page]")
     return p
 

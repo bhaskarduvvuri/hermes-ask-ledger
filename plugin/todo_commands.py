@@ -20,13 +20,16 @@ def command(plugin, name, raw='', *, session_id='', platform='', source=None, **
             if platform.lower() not in LOCAL_PLATFORMS: return "Ask Ledger can't tell who you are in this chat yet; send a message first."
             sender = ''
         now, tz = clock(kwargs); log = TodoLog(plugin._data_dir()); words = raw.split()
+        # A typed command is a new action every time (it runs outside model turns, so a turn id
+        # cannot tell two of them apart): a fresh request id, never a replay of an earlier one.
         common = dict(request_id=request(), now=now, tz=tz)
         if name == 'todo':
             if not raw.startswith('add ') or not raw[4:].strip(): return 'Usage: /todo add text | category | due'
             parts = [s.strip() for s in raw[4:].split('|')]
             if len(parts) > 3: return 'Usage: /todo add text | category | due'
             category = parts[1] if len(parts) > 1 and parts[1] else guess_topic(parts[0])
-            due = resolve_due(parts[2], now, tz) if len(parts) > 2 and parts[2] else ''
+            try: due = resolve_due(parts[2], now, tz) if len(parts) > 2 and parts[2] else ''
+            except (ValueError, TypeError): return 'Due is today, tomorrow or YYYY-MM-DD'
             result = log.add_todo(sender, parts[0], origin='user', category=category, due=due, **common)
             return clean((result['id'] + ' ' if result['id'] else '') + result['message'])
         if name in ('done', 'drop', 'snooze'):
@@ -38,7 +41,8 @@ def command(plugin, name, raw='', *, session_id='', platform='', source=None, **
                     if choice is None: return 'Usage: /snooze id time'
                     expression = {'1 hour':'1h', 'This evening':'tonight', 'Tomorrow':'tomorrow'}.get(choice, '')
                 else: expression = words[1]
-                until = resolve_snooze(expression, now, tz)
+                try: until = resolve_snooze(expression, now, tz)
+                except (ValueError, TypeError): return 'Choose 1h, tonight, tomorrow, a date or HH:MM'
                 if until is None: action = 'clear_snooze'
             result = log.apply_action(sender, words[0], action, by='user', how='command', snooze_until=until, **common)
             return clean((result['id'] + ' ' if result['id'] else '') + result['message'])
@@ -52,6 +56,25 @@ def command(plugin, name, raw='', *, session_id='', platform='', source=None, **
             return '\n'.join(lines)
         if words: return 'Usage: /todos stats'
         visible = [i for i in open_items(items, sender, now, tz) if i.origin != 'message' or i.category or i.due or i.snooze_until]
+        ask = getattr(plugin.ctx, 'ask_choice', None)
+        if ask and visible:
+            private = {a.id for a in plugin.ledger().asks() if a.private and a.sender == sender}
+            choices = [{'value': i.id, 'label': clean(i.id + ' ' + ('(private)' if i.id in private else i.text))} for i in visible[:8]]
+            picked = ask('Which todo?', choices)
+            if picked is not None:
+                item = next((i for i in visible[:8] if i.id == picked), None)
+                if item is None: return 'Nothing changed.'
+                choice = ask(item.id + ': what now?', ['Snooze', 'Done', 'Drop'])
+                if choice not in ('Snooze', 'Done', 'Drop'): return 'Nothing changed.'
+                until = None
+                when = ''
+                if choice == 'Snooze':
+                    when = ask('Snooze until when?', ['1 hour', 'This evening', 'Tomorrow'])
+                    if when not in ('1 hour', 'This evening', 'Tomorrow'): return 'Nothing changed.'
+                    until = resolve_snooze({'1 hour':'1h', 'This evening':'tonight', 'Tomorrow':'tomorrow'}[when], now, tz)
+                common['request_id'] = request()
+                result = log.apply_action(sender, item.id, choice.lower(), by='user', how='button', rev=item.rev, snooze_until=until, **common)
+                return clean((result['id'] + ' ' if result['id'] else '') + result['message'])
         visible.sort(key=lambda i: (not bool(i.category), i.category, i.id))
         lines = []; previous = None
         shown = 0
