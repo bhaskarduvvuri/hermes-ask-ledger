@@ -121,7 +121,7 @@ class Ledger:
             if op == "closed" and aid in asks:
                 cur = asks[aid]
                 reason = str(ev.get("reason", ""))
-                asks[aid] = replace(cur, state="closed", reason=reason, answer=reason, updated=str(ev.get("ts", cur.updated)))
+                asks[aid] = replace(cur, state="closed", reason=reason, updated=str(ev.get("ts", cur.updated)))
             return
         if op == "new":
             if aid in asks or not _ID_RE.match(str(aid)):
@@ -183,8 +183,7 @@ class Ledger:
         return _Lock()
 
     def _append(self, ev: dict) -> None:
-        events = ev if isinstance(ev, list) else [ev]
-        data = "".join(json.dumps({"v": SCHEMA, **event}, ensure_ascii=False, separators=(",", ":")) + "\n" for event in events).encode("utf-8")
+        data = (json.dumps({"v": SCHEMA, **ev}, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
         # A torn last line (crash mid-write) must not swallow the next event.
         try:
             with open(self.path, "rb") as f:

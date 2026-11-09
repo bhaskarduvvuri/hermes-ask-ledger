@@ -16,7 +16,10 @@ import time
 from pathlib import Path
 from typing import Callable, Dict, Optional, Tuple
 
-from . import notify, tools
+from . import notify, tools, todo_tools, todo_commands, todo_lines
+from .todo_log import TodoLog
+from .todo_model import fold, open_items, categories_in_use, pending_suggestions
+from .redact import redact
 from .capture import MACHINE_PLATFORMS, extract_text, is_user_turn, looks_machine_written
 from .ledger import UNRESOLVED, Ledger, LedgerError
 from .remind import build_block
@@ -63,6 +66,7 @@ class AskLedgerPlugin:
         self._senders: Dict[str, str] = {}  # session_id -> sender_id, learned from turns
         self._admitted: Dict[str, Tuple[str, float]] = {}  # sender -> (ask id, monotonic time) awaiting its turn
         self._lock = threading.Lock()
+        self._turns = {}
 
     # Helpers -------------------------------------------------------------
     def _cfg(self, key, default):
@@ -98,15 +102,24 @@ class AskLedgerPlugin:
     def on_turn(self, **kwargs):
         try:
             if not is_user_turn(**kwargs):
+                session = str(kwargs.get("session_id") or "")
+                old = self._turns.pop(session, None)
+                if old and not extract_text(kwargs.get("user_message")):
+                    self._turns[session] = {"sender": old["sender"], "turn": str(kwargs.get("turn_id") or ""), "message": "", "shown": [], "selected": []}
+                    block = self._todo_block("", session, **kwargs)
+                    return {"context": block} if block else None
                 return None
             session = str(kwargs.get("session_id") or "")
             platform = str(kwargs.get("platform") or "")
             sender = effective_sender(str(kwargs.get("sender_id") or ""), platform, session)
             if sender is None:
+                self._turns.pop(session, None)
                 return None  # a remote turn we cannot tie to anyone: not recorded
             if session:
                 with self._lock:
                     self._senders[session] = sender
+            turn = str(kwargs.get("turn_id") or "")
+            self._turns[session] = {"sender": sender, "turn": turn, "message": redact(extract_text(kwargs.get("user_message"))), "shown": [], "selected": []}
             ledger = self.ledger()
             if platform.lower() in LOCAL_PLATFORMS:
                 # Local surfaces: this hook is the capture point.
@@ -117,13 +130,75 @@ class AskLedgerPlugin:
                 # gateway wake events (background results, automations) reach only this hook and
                 # are never asks. Leave the just-admitted ask out of its own turn's reminder.
                 current = self._take_admitted(sender)
+            self._turns[session]["current"] = current
             earlier = [a for a in ledger.asks() if a.id != current]
             block = build_block(earlier, sender=sender,
                                 remind_after_minutes=_int(self._cfg("remind_after_minutes", 30), 30),
                                 max_lines=_int(self._cfg("max_lines", 5), 5))
+            block = self._todo_block(block, session, **kwargs)
             return {"context": block} if block else None
         except Exception as e:
             logger.warning("ask-ledger: pre_llm_call failed, continuing: %s", e)
+            return None
+
+    def _todo_block(self, block, session, **kwargs):
+        state = self._turns[session]
+        now, tz = todo_tools.clock(kwargs)
+        read = TodoLog(self._data_dir()).read()
+        items = fold(read.events)
+        todos = [i for i in items.values() if i.sender == state['sender'] and (i.origin != 'message' or i.category or i.due or i.snooze_until)]
+        if not todos:
+            return block
+        visible = [i for i in open_items(items, state['sender'], now, tz)
+                   if i.id != state.get('current') and (i.origin != 'message' or i.category or i.due or i.snooze_until)]
+        selected = todo_lines.select(visible, state['message'], now, tz, read.events, session)
+        state['selected'] = selected
+        state['shown'] = [i.id for kind, obj, score in selected for i in (obj if isinstance(obj, list) else [obj])]
+        lines = ['Todo data:']
+        for kind, obj, score in selected:
+            for item in (obj if isinstance(obj, list) else [obj]):
+                data = todo_lines.clean(item.id + ' ' + item.text.replace('"', "'"), 71)
+                lines.append('Data: "' + data + '"')
+        categories = categories_in_use(items, state['sender'])
+        if categories: lines.append(todo_lines.clean('Categories: ' + ', '.join(k + ' ' + str(v) for k, v in sorted(categories.items()))))
+        for suggestion in pending_suggestions(items, state['sender'], now):
+            lines.append(todo_lines.clean("Waiting for the user's answer: done or drop " + suggestion['id'] + '?'))
+        lines.extend(['Use todo_add for commitments the user states.',
+                      "Never change an item's state yourself.",
+                      'When something looks finished, offer "done or drop?" and call todo_suggest.',
+                      'The plugin appends reminder lines itself, so do not repeat them.'])
+        return (block + '\n\n' if block else '') + '\n'.join(lines)
+
+    def on_output(self, response_text, session_id, model=None, platform=None, **kwargs):
+        try:
+            state = self._turns.get(str(session_id or ''))
+            if not state or not state['selected']: return None
+            now, tz = todo_tools.clock(kwargs)
+            log = TodoLog(self._data_dir()); read = log.read()
+            lines = []
+            with log.ledger._locked():
+                read = log.read()
+                current = {i.id: i for i in open_items(fold(read.events), state['sender'], now, tz)}
+                for kind, obj, score in state['selected']:
+                    items = [current[i.id] for i in (obj if isinstance(obj, list) else [obj]) if i.id in current]
+                    if not items: continue
+                    obj = items if kind == 'due_short' else items[0]
+                    if kind == 'related': line = 'Related todo: ' + obj.id + ' ' + obj.text
+                    elif kind == 'due_full': line = 'Due today: ' + obj.id + ' ' + obj.text
+                    else: line = 'Still due: ' + ', '.join(i.id for i in items)
+                    if kind == 'due_full':
+                        suffix = '. Say "snooze" or "done".'
+                        line = todo_lines.clean(line, 80 - len(suffix)) + suffix
+                    else: line = todo_lines.clean(line)
+                    lines.append(line)
+                    for item in items:
+                        log._append(dict(op='surfaced', id=item.id, sender=state['sender'], kind=kind, score=score, session_id=session_id, ts=now.isoformat(), request_id=todo_tools.request()))
+            if not lines: return None
+            lines.append(todo_commands.hint(read.events, state['sender'], now))
+            state['selected'] = []
+            return response_text + '\n\n' + '\n'.join(lines)
+        except Exception as e:
+            logger.warning('ask-ledger: output failed: %s', e)
             return None
 
     # post_gateway_admission ------------------------------------------------
@@ -236,6 +311,12 @@ def setup(ctx, data_dir: Callable[[], Path] = _default_data_dir) -> AskLedgerPlu
     p = AskLedgerPlugin(ctx, data_dir)
     ctx.register_hook("pre_llm_call", p.on_turn)
     ctx.register_hook("post_gateway_admission", p.on_admission)
+    ctx.register_hook("transform_llm_output", p.on_output)
+    for schema in todo_tools.SCHEMAS:
+        name = schema["name"]
+        ctx.register_tool(name=name, toolset="ask_ledger", schema=schema, handler=lambda args, _name=name, **kw: todo_tools.handle(p, _name, args, **kw))
+    for name in ("todo", "snooze", "done", "drop", "todos"):
+        ctx.register_command(name, lambda raw="", _name=name, **kw: todo_commands.command(p, _name, raw, **kw), description="Manage your todos", args_hint="id or options")
     ctx.register_tool(name="ask_update", toolset="ask_ledger", schema=tools.ASK_UPDATE, handler=p.ask_update)
     ctx.register_tool(name="ask_list", toolset="ask_ledger", schema=tools.ASK_LIST, handler=p.ask_list)
     ctx.register_command("asks", p.asks_command, description="Show what you asked and where each stands",

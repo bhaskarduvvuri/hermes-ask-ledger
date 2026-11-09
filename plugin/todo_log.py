@@ -1,4 +1,9 @@
-"""Transactional todo writes using the ask ledger lock."""
+"""Transactional todo writes using the ask ledger lock.
+
+Events: todo_new, filed, promoted, snoozed, closed, suggested,
+suggestion_answered, surfaced, and request_result (an idempotency receipt
+for refused or duplicate requests, with no item state change).
+"""
 import hashlib
 import json
 import re
@@ -45,13 +50,9 @@ class TodoLog:
         return ReadResult(events, degraded)
 
     def _append(self, event):
-        events = event if isinstance(event, list) else [event]
-        prepared = []
-        for entry in events:
-            entry = {'v': 1, **entry}
-            entry['ck'] = checksum(entry)
-            prepared.append(entry)
-        self.ledger._append(prepared)
+        event = {'v': 1, **event}
+        event['ck'] = checksum(event)
+        self.ledger._append(event)
 
     def _receipt(self, sender, request_id, now, result):
         if request_id:
@@ -71,6 +72,25 @@ class TodoLog:
     @staticmethod
     def _normal(text):
         return re.sub(r'[^\w\s]+$', '', ' '.join(text.lower().split())).rstrip()
+
+    @staticmethod
+    def _consented_words(words, message):
+        if not isinstance(words, str) or not words.strip() or not isinstance(message, str) or len(message) > 160:
+            return False
+        norm = lambda s: ' '.join(s.casefold().split())
+        phrase = norm(words)
+        pattern = re.compile(r'(?<!\w)' + re.escape(phrase) + r'(?!\w)')
+        original = norm(message)
+        unquoted = norm(re.sub(r'''"[^"\n]*"|“[^”\n]*”|(?<!\w)'[^'\n]*'(?!\w)|‘[^’\n]*’''', ' ', message))
+        if not pattern.search(original):
+            return False
+        negations = {"not", "no", "don't", "dont", "never", "isn't", "haven't", "hasn't", "didn't"}
+        for match in pattern.finditer(unquoted):
+            before = re.findall(r"[\w]+(?:['’][\w]+)?", unquoted[:match.start()])
+            within = re.findall(r"[\w]+(?:['’][\w]+)?", phrase)
+            if not any(token.replace('’', "'") in negations for token in before[-2:] + within):
+                return True
+        return False
 
     @staticmethod
     def _category(category, items, sender):
@@ -119,16 +139,17 @@ class TodoLog:
         self.ledger._changed()
         return result
 
-    def apply_action(self, sender, item_id, action, *, by, how, rev=None, user_words=None, current_message=None, shown_ids=(), snooze_until=None, category=None, due=None, suggestion=None, request_id, now, tz, turn_key=None):
+    def apply_action(self, sender, item_id, action, *, by, how, rev=None, user_words=None, current_message=None, shown_ids=(), snooze_until=None, category=None, due=None, suggestion=None, suggestion_id=None, request_id, now, tz, turn_key=None):
         """Validate consent and append an item action under the ledger lock."""
+        match = re.fullmatch(r'([aAtT])([0-9]+)', str(item_id).strip())
+        if not match: return self._result(False, message='No such item')
+        ident = match.group(1).upper() + (match.group(2).lstrip('0') or '0')
         request_id = _safe_key(request_id)
         if turn_key is not None: turn_key = _safe_key(str(turn_key))
         with self.ledger._locked():
             events = self.read().events
             prior = self._prior(events, sender, request_id)
             if prior is not None: return prior
-            match = re.fullmatch(r'([aAtT])(\d{1,9})', str(item_id).strip())
-            ident = match.group(1).upper() + str(int(match.group(2))) if match else str(item_id).upper()
             items = fold(events); item = items.get(ident)
             fail = lambda msg: self._receipt(sender, request_id, now, self._result(False, ident, msg, item.state if item else '', item.rev if item else 0))
             if not item or item.sender != sender: return fail(f'No such item {ident}')
@@ -136,15 +157,14 @@ class TodoLog:
             if by not in ('user', 'agent') or how not in ('command', 'button', 'words'): return fail('Ask the user to confirm')
             if action not in ('done', 'drop', 'snooze', 'clear_snooze', 'file', 'suggest', 'answer_suggestion'): return fail('Unknown action')
             pending = bool(pending_suggestions({ident: item}, sender, now))
+            if action == 'answer_suggestion' and (not pending or suggestion_id != item.suggestion.get('suggestion_id')):
+                return fail('That suggestion is no longer open')
             if action in ('done', 'drop', 'snooze', 'clear_snooze', 'answer_suggestion'):
                 if how == 'button' and by == 'user':
                     if rev != item.rev: return fail(f'{ident} changed since you looked')
                 elif how == 'command' and by == 'user': pass
                 elif how == 'words':
-                    norm = lambda s: ' '.join(s.casefold().split())
-                    if not isinstance(current_message, str) or len(current_message) > 160 or not user_words or norm(user_words) not in norm(current_message): return fail('Ask the user to confirm')
-                    unquoted = re.sub(r'''"[^"\n]*"|“[^”\n]*”|(?<!\w)'[^'\n]*'(?!\w)|‘[^’\n]*’''', ' ', current_message)
-                    if norm(user_words) not in norm(unquoted): return fail('Ask the user to confirm')
+                    if not self._consented_words(user_words, current_message): return fail('Ask the user to confirm')
                     if ident not in {str(x).upper() for x in shown_ids} and not pending: return fail('Ask the user to confirm')
                     if not turn_key or any(e.get('id') == ident and e.get('how') == 'words' and e.get('turn_key') == turn_key for e in events): return fail('Ask the user to confirm')
                 else: return fail('Ask the user to confirm')
@@ -153,14 +173,13 @@ class TodoLog:
             elif action == 'suggest':
                 if pending: return fail('Suggestion already pending')
                 if item.declined_at and now - instant(item.declined_at) < timedelta(hours=24): return fail('Suggestion recently declined')
-            if action in ('done', 'drop', 'snooze', 'clear_snooze') and item.state in ('closed', 'done', 'dropped', 'answered'):
-                if action in ('done', 'drop'): return fail('Already ' + (item.reason or item.state))
+            if action in ('done', 'drop', 'snooze', 'clear_snooze') and item.state in ('closed', 'done', 'dropped'):
+                if action in ('done', 'drop'): return fail('Already ' + item.state)
                 return fail('Cannot snooze a closed item')
             ts = now.astimezone(timezone.utc).isoformat()
             event = dict(id=ident, sender=sender, by=by, how=how, how_text=' '.join(redact(user_words or '').split())[:40], request_id=request_id, ts=ts)
             if turn_key is not None: event['turn_key'] = str(turn_key)
             state = item.state
-            accepted_answer = None
             if action in ('done', 'drop'):
                 event.update(op='closed', reason='done' if action == 'done' else 'dropped')
                 state = 'closed' if item.origin == 'message' else event['reason']
@@ -190,11 +209,10 @@ class TodoLog:
                 if suggestion not in ('accepted', 'declined'): return fail('Invalid answer')
                 event.update(op='suggestion_answered', suggestion_id=item.suggestion['suggestion_id'], answer=suggestion)
                 if suggestion == 'accepted':
-                    accepted_answer = dict(event)
                     event.update(op='closed', reason='done' if item.suggestion['action'] == 'done' else 'dropped')
                     state = 'closed' if item.origin == 'message' else event['reason']
-            result = self._result(True, ident, action.replace('_', ' ').capitalize(), state, item.rev + (2 if accepted_answer else 1))
+            result = self._result(True, ident, action.replace('_', ' ').capitalize(), state, item.rev + 1)
             event['result'] = result
-            self._append([accepted_answer, event] if accepted_answer else event)
+            self._append(event)
         self.ledger._changed()
         return result

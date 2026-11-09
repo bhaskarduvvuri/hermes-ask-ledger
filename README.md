@@ -54,7 +54,21 @@ Not an audit of the agent's tool calls: it tracks what you asked and promised.
   push to your [ntfy](https://ntfy.sh) topic saying only "N things need you"
   and the page link.
 
-On a shared gateway, every user sees and changes only their own asks.
+- **Todos.** Things you mean to do, beside your asks: `T1`, `T2`, … with a
+  category and an optional due date. You add them with `/todo add`, or the
+  agent adds one when you commit to something ("I'll book the dentist after
+  the launch"), marked `added by agent`. An ask becomes a todo when it gets a
+  category or due date.
+- **Snooze, done, drop.** By command (`/snooze T4 tonight`, `/done T4`,
+  `/drop T4`) or in plain words ("remind me after lunch", "done"). The agent
+  can only suggest these ("done or drop?"); a plain-words action goes through
+  only when your words are in your current, short message.
+- **Reminders at the end of a reply.** The plugin itself adds at most three
+  plain lines under the agent's reply: a todo related to what you are talking
+  about, and what is due. A due item is shown in full once, then as a short
+  "Still due" at most every 30 minutes, until you snooze it or finish it.
+
+On a shared gateway, every user sees and changes only their own asks and todos.
 
 ## Install
 
@@ -93,7 +107,19 @@ Then start a session and ask something. `/asks` shows the ledger.
 | `/asks private A3` / `/asks public A3` | Hide or show an ask's words on the page and in reminders |
 | `/asks page` | The page's location |
 
-The agent uses `ask_update(id, state, answer_line)` and `ask_list()`.
+| `/todo add <text> \| <category> \| <due>` | Add a todo; category and due (`today`, `tomorrow`, `YYYY-MM-DD`) are optional |
+| `/todos` | Your open todos by category, with the snoozed count |
+| `/todos stats` | How often you snoozed and closed, by command, button or words (local only) |
+| `/snooze T4 [1h \| tonight \| tomorrow \| YYYY-MM-DD \| HH:MM \| now]` | Snooze; with no time you pick from a short list; `now` clears it |
+| `/done T4`, `/drop T4` | Finish or drop a todo or an ask |
+
+Everything here also works in plain words, which is the dependable path on
+chats that do not pass plugin commands through. On a gateway where
+`allow_admin_from` limits commands, add `todo`, `todos`, `snooze`, `done` and
+`drop` to `user_allowed_commands` so other users can run them.
+
+The agent uses `ask_update(id, state, answer_line)`, `ask_list()`, and
+`todo_add`, `todo_update`, `todo_suggest`, `todo_list`.
 
 ## Settings
 
@@ -106,6 +132,7 @@ plugin settings form:
 | `max_lines` | `5` | Most asks listed in the reminder |
 | `page_url` | empty | URL to show for the page if you serve it; default is the local file |
 | `ntfy_url` | empty | `https://` ntfy topic URL; empty means no notifications |
+| `agent_adds` | `true` | Let the agent add todos when you commit to something (at most 2 a turn, 10 a day) |
 
 ## What it stores and sends (disclosure)
 
@@ -116,9 +143,15 @@ plugin settings form:
   `password=`-style values, long hex/base64 strings) are replaced with
   `[redacted]`. Redaction is best effort; mark sensitive asks private.
   The log is append-only and is never pruned; delete the folder to reset.
+- **Stores** your todos and every snooze, close and suggestion as events in
+  the same log, with how you did it (command, button or words) so `/todos
+  stats` can count it locally. Nothing about this leaves your machine.
 - **Sends to your model provider** the reminder note (up to 5 asks' ids, state,
-  age and first 90 characters), as part of your message each turn. Private
-  asks are sent as "(private)".
+  age and first 90 characters, plus up to 3 todos and your category names), as
+  part of your message each turn. Private asks are sent as "(private)".
+- **Adds to the agent's reply** up to three plain reminder lines and a short
+  hint, through Hermes's `transform_llm_output` hook. If another plugin also
+  rewrites replies, Hermes keeps only the first rewrite.
 - **Network:** none, unless you set `ntfy_url`. Then one HTTPS POST to that
   URL per change to "needs you", containing only a count and the page link.
 - **Does not:** run shell commands, read files outside its own data folder,
