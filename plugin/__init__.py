@@ -64,7 +64,7 @@ class AskLedgerPlugin:
         self.ctx = ctx
         self._data_dir = data_dir
         self._senders: Dict[str, str] = {}  # session_id -> sender_id, learned from turns
-        self._admitted: Dict[str, Tuple[str, float]] = {}  # sender -> (ask id, monotonic time) awaiting its turn
+        self._admitted: Dict[str, tuple] = {}  # sender -> (ask id, monotonic time, chat type, chat id) awaiting its turn
         self._lock = threading.Lock()
         self._turns = {}
         self._boards = {}
@@ -100,6 +100,14 @@ class AskLedgerPlugin:
         with self._lock:
             return self._senders.get(session_id)
 
+    def _private_chat(self, platform, chat_type, chat_id):
+        if str(platform or '').lower() in LOCAL_PLATFORMS or chat_type == 'dm':
+            return True
+        trusted = self._cfg('trusted_chats', [])
+        if not isinstance(trusted, list) or not all(isinstance(value, str) for value in trusted):
+            return False
+        return chat_id is not None and str(platform or '') + ':' + str(chat_id) in trusted
+
     # pre_llm_call --------------------------------------------------------
     def on_turn(self, **kwargs):
         try:
@@ -107,7 +115,7 @@ class AskLedgerPlugin:
                 session = str(kwargs.get("session_id") or "")
                 old = self._turns.pop(session, None)
                 if old and not extract_text(kwargs.get("user_message")):
-                    self._turns[session] = {"sender": old["sender"], "turn": str(kwargs.get("turn_id") or ""), "message": "", "shown": [], "selected": []}
+                    self._turns[session] = {"sender": old["sender"], "turn": str(kwargs.get("turn_id") or ""), "message": "", "shown": [], "selected": [], "private": old.get("private", False), "chat_type": old.get("chat_type"), "chat_id": old.get("chat_id"), "platform": old.get("platform", "") }
                     block = self._todo_block("", session, **kwargs)
                     return {"context": block} if block else None
                 return None
@@ -121,7 +129,13 @@ class AskLedgerPlugin:
                 with self._lock:
                     self._senders[session] = sender
             turn = str(kwargs.get("turn_id") or "")
-            self._turns[session] = {"sender": sender, "turn": turn, "message": redact(extract_text(kwargs.get("user_message"))), "shown": [], "selected": []}
+            old = self._turns.get(session, {})
+            admission = self._take_admitted(sender) if platform.lower() not in LOCAL_PLATFORMS else None
+            chat_type, chat_id = (admission[1], admission[2]) if admission else (None, None)
+            if not admission and not extract_text(kwargs.get("user_message")) and old.get("sender") == sender:
+                chat_type, chat_id = old.get("chat_type"), old.get("chat_id")
+            private = self._private_chat(platform, chat_type, chat_id)
+            self._turns[session] = {"sender": sender, "turn": turn, "message": redact(extract_text(kwargs.get("user_message"))), "shown": [], "selected": [], "private": private, "chat_type": chat_type, "chat_id": chat_id, "platform": platform}
             ledger = self.ledger()
             if platform.lower() in LOCAL_PLATFORMS:
                 # Local surfaces: this hook is the capture point.
@@ -131,7 +145,7 @@ class AskLedgerPlugin:
                 # Messaging platforms: the person's message was captured at admission (on_admission);
                 # gateway wake events (background results, automations) reach only this hook and
                 # are never asks. Leave the just-admitted ask out of its own turn's reminder.
-                current = self._take_admitted(sender)
+                current = admission[0] if admission else ""
             self._turns[session]["current"] = current
             earlier = [a for a in ledger.asks() if a.id != current]
             block = build_block(earlier, sender=sender,
@@ -145,6 +159,9 @@ class AskLedgerPlugin:
 
     def _todo_block(self, block, session, **kwargs):
         state = self._turns[session]
+        if not state['private']:
+            instruction = "This chat is shared: do not name the user's todos or asks in your reply unless the user asks about them."
+            block = (block + '\n\n' if block else '') + instruction
         now, tz = todo_tools.clock(kwargs)
         read = TodoLog(self._data_dir()).read()
         items = fold(read.events)
@@ -153,7 +170,7 @@ class AskLedgerPlugin:
             return block
         visible = [i for i in open_items(items, state['sender'], now, tz)
                    if i.id != state.get('current') and (i.origin != 'message' or i.category or i.due or i.snooze_until)]
-        selected = todo_lines.select(visible, state['message'], now, tz, read.events, session)
+        selected = todo_lines.select(visible, state['message'], now, tz, read.events, session, shared=not state['private'])
         state['selected'] = selected
         state['shown'] = [i.id for kind, obj, score in selected for i in (obj if isinstance(obj, list) else [obj])]
         lines = ['Todo data:']
@@ -182,9 +199,16 @@ class AskLedgerPlugin:
             with log.ledger._locked():
                 read = log.read()
                 current = {i.id: i for i in open_items(fold(read.events), state['sender'], now, tz)}
+                shared_count = 0
                 for kind, obj, score in state['selected']:
                     items = [current[i.id] for i in (obj if isinstance(obj, list) else [obj]) if i.id in current]
                     if not items: continue
+                    if not state.get('private', True):
+                        if kind == 'related': continue
+                        shared_count += len(items)
+                        for item in items:
+                            log._append(dict(op='surfaced', id=item.id, sender=state['sender'], kind=kind, score=score, session_id=session_id, ts=now.isoformat(), request_id=todo_tools.request()))
+                        continue
                     obj = items if kind == 'due_short' else items[0]
                     if kind == 'related': line = 'Related todo: ' + obj.id + ' ' + obj.text
                     elif kind == 'due_full': line = 'Due today: ' + obj.id + ' ' + obj.text
@@ -196,8 +220,10 @@ class AskLedgerPlugin:
                     lines.append(line)
                     for item in items:
                         log._append(dict(op='surfaced', id=item.id, sender=state['sender'], kind=kind, score=score, session_id=session_id, ts=now.isoformat(), request_id=todo_tools.request()))
+            if not state.get('private', True) and shared_count:
+                lines.append('You have ' + str(shared_count) + (' todo due. /todos to see it.' if shared_count == 1 else ' todos due. /todos to see them.'))
             if not lines: return None
-            lines.append(todo_commands.hint(read.events, state['sender'], now))
+            if state.get('private', True): lines.append(todo_commands.hint(read.events, state['sender'], now))
             state['selected'] = []
             return response_text + '\n\n' + '\n'.join(lines)
         except Exception as e:
@@ -217,22 +243,30 @@ class AskLedgerPlugin:
             source = kwargs.get("source")
             user_id = str(source.get("user_id") or "") if isinstance(source, dict) else ""
             text = kwargs.get("text")
-            if not user_id or not isinstance(text, str) or not text.strip() or text.strip().startswith("/"):
-                return None  # fail closed: no identity, nothing said, or a command
+            if not user_id:
+                return None
+            admitted_at = time.monotonic()
+            with self._lock:
+                self._admitted[user_id] = ("", admitted_at, source.get("chat_type"), source.get("chat_id"))
+            if not isinstance(text, str) or not text.strip() or text.strip().startswith("/"):
+                return None  # nothing to capture, or a command
             if looks_machine_written(text):
                 return None
             ask = self.ledger().add(text, sender=user_id, session=str(kwargs.get("session_key") or ""),
                                     platform=platform)
             with self._lock:
-                self._admitted[user_id] = (ask.id, time.monotonic())
+                if self._admitted.get(user_id, (None, None))[1] == admitted_at:
+                    self._admitted[user_id] = (ask.id, admitted_at, source.get("chat_type"), source.get("chat_id"))
         except Exception as e:
             logger.warning("ask-ledger: post_gateway_admission failed, continuing: %s", e)
         return None
 
-    def _take_admitted(self, sender: str) -> str:
+    def _take_admitted(self, sender: str):
         with self._lock:
-            ask_id, at = self._admitted.pop(sender, ("", 0.0))
-        return ask_id if ask_id and time.monotonic() - at < ADMISSION_TURN_WINDOW_S else ""
+            admitted = self._admitted.pop(sender, None)
+        if admitted and time.monotonic() - admitted[1] < ADMISSION_TURN_WINDOW_S:
+            return admitted[0], admitted[2], admitted[3]
+        return None
 
     # Tools ---------------------------------------------------------------
     def ask_update(self, args, **kwargs) -> str:

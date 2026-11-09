@@ -14,14 +14,14 @@ def words(value):
     return set(re.findall(r'[a-z0-9]+', value.lower())) - _STOP
 
 
-def select(items, message, now, tz, events=(), session_id=''):
+def select(items, message, now, tz, events=(), session_id='', shared=False):
     events = list(events)
     def history(item, kind):
         return [e for e in events if e.get('id') == item.id and e.get('op') == 'surfaced' and e.get('kind') == kind]
     def fresh(item, event):
         return bool(item.snooze_until and event and instant(item.snooze_until) <= now and instant(item.snooze_until) > instant(event['ts']))
     related = []
-    if message:
+    if message and not shared:
         query = words(message)
         for item in items:
             score = len(query & words(item.text)) + 2 * len(query & words(item.category))
@@ -32,7 +32,8 @@ def select(items, message, now, tz, events=(), session_id=''):
     related.sort(key=lambda x: (-x[1], x[0].due or '9999', x[2]['ts'] if x[2] else '', int(x[0].id[1:]) if x[0].id[1:].isdigit() else 0))
     result = [('related', related[0][0], related[0][1])] if related else []
     today = now.astimezone(tz).date().isoformat()
-    due = sorted((i for i in items if i.due and i.due <= today), key=lambda i: (i.due, i.id))[:2]
+    due = sorted((i for i in items if i.due and i.due <= today), key=lambda i: (i.due, i.id))
+    if not shared: due = due[:2]
     short = []
     for item in due:
         hist = history(item, 'due_full'); last = hist[-1] if hist else None

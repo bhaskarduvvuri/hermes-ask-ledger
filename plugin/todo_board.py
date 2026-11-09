@@ -16,6 +16,26 @@ def refresh(plugin, session, sender, **kwargs):
     if str(session) in plugin._board_failed:
         return
     try:
+        source = kwargs.get('source')
+        state = plugin._turns.get(str(session), {})
+        if source is not None:
+            platform = str(kwargs.get('platform') or '')
+            private = plugin._private_chat(platform, getattr(source, 'chat_type', None), getattr(source, 'chat_id', None))
+        else:
+            private = state.get('private')
+            if private is None:
+                from . import LOCAL_PLATFORMS
+                private = str(kwargs.get('platform') or '').lower() in LOCAL_PLATFORMS
+        old = plugin._boards.get(key)
+        if not private:
+            text = 'Open todos: see /todos'
+            if old and old[1] != text:
+                handle = old[0]
+                result = handle.edit(text)
+                if not handle.ok or not result.get('ok', False):
+                    raise RuntimeError(getattr(handle, 'error', 'message failed'))
+                plugin._boards[key] = (handle, text)
+            return
         now, tz = clock(kwargs)
         items = fold(TodoLog(plugin._data_dir()).read().events)
         visible = open_items(items, sender, now, tz)

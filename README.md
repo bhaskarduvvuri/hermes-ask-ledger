@@ -72,6 +72,11 @@ Not an audit of the agent's tool calls: it tracks what you asked and promised.
   one is sent). It ends with "/todos to snooze or finish".
 
 On a shared gateway, every user sees and changes only their own asks and todos.
+In a group, channel or thread chat, everyone can read what the plugin adds, so
+there it shows counts only ("You have 1 todo due. /todos to see it."), posts no
+Open todos message, and asks the agent not to name your items. What you type
+yourself (`/todos`, `/asks`) still shows your own list. A chat whose type is
+unknown counts as shared.
 
 ## Install
 
@@ -137,6 +142,7 @@ plugin settings form:
 | `ntfy_url` | empty | `https://` ntfy topic URL; empty means no notifications |
 | `agent_adds` | `true` | Let the agent add todos when you commit to something (at most 2 a turn, 10 a day) |
 | `board` | `true` | Keep one "Open todos" message in each chat, edited in place as the list changes |
+| `trusted_chats` | empty | Shared chats allowed to show todo text, as `platform:chat_id` (for example a household group) |
 
 ## What it stores and sends (disclosure)
 

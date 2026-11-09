@@ -9,6 +9,7 @@ provides_tools: [ask_update, ask_list, todo_add, todo_update, todo_suggest, todo
 provides_hooks: [pre_llm_call, post_gateway_admission, transform_llm_output]
 tags: [productivity, memory]
 config_schema:
+  trusted_chats: {type: list, default: [], label: "Trusted shared chats", description: "Chat IDs as platform:chat_id allowed to show todo text"}
   board: {type: bool, default: true, label: "Show open todos board"}
   agent_adds: {type: bool, default: true, label: "Allow agent adds"}
   remind_after_minutes: {type: int, default: 30, label: "Remind after (minutes)", description: "Open asks older than this are listed in the agent's reminder"}
