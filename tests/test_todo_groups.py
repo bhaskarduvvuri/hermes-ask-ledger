@@ -91,6 +91,8 @@ class TodoGroupsTest(unittest.TestCase):
 
     def test_model_instruction_only_in_shared_chat(self):
         instruction = "This chat is shared: do not name the user's todos or asks in your reply unless the user asks about them."
+        # The instruction appears only when the person has something stored (see test_todo_groups_instruction).
+        TodoLog(self.tmp.name).add_todo('alice', 'stored todo', origin='user', request_id='stored', now=NOW, tz=timezone.utc)
         self.admit('group')
         self.assertIn(instruction, self.turn()['context'])
         self.admit('dm')

@@ -34,6 +34,17 @@ LOCAL_PLATFORMS = {"", "cli", "tui", "desktop", "local"}
 ADMISSION_TURN_WINDOW_S = 600
 
 
+CONSENT_MAX_CHARS = 160
+
+
+def _consent_copy(user_message):
+    """The user's current message as the consent check may use it: redacted, or None when the
+    message as sent is longer than CONSENT_MAX_CHARS. The length is the original's, because
+    redaction can shorten a long message (a long token becomes '[redacted]')."""
+    text = extract_text(user_message)
+    return None if len(text) > CONSENT_MAX_CHARS else redact(text)
+
+
 def _chat_key(chat_type, chat_id):
     """A chat is its id; without an id its type stands in, so two id-less chats of different
     types still count as two, and an unknown chat never matches a known one."""
@@ -149,7 +160,7 @@ class AskLedgerPlugin:
                 if known != _chat_key(chat_type, chat_id):
                     chat_type, chat_id = None, None
             private = self._private_chat(platform, chat_type, chat_id)
-            self._turns[session] = {"sender": sender, "turn": turn, "message": redact(extract_text(kwargs.get("user_message"))), "shown": [], "selected": [], "private": private, "chat_type": chat_type, "chat_id": chat_id, "platform": platform}
+            self._turns[session] = {"sender": sender, "turn": turn, "message": redact(extract_text(kwargs.get("user_message"))), "consent_message": _consent_copy(kwargs.get("user_message")), "shown": [], "selected": [], "private": private, "chat_type": chat_type, "chat_id": chat_id, "platform": platform}
             ledger = self.ledger()
             if platform.lower() in LOCAL_PLATFORMS:
                 # Local surfaces: this hook is the capture point.
@@ -171,14 +182,24 @@ class AskLedgerPlugin:
             logger.warning("ask-ledger: pre_llm_call failed, continuing: %s", e)
             return None
 
+    def _has_open_items(self, state, items):
+        """Whether this person has an ask or todo that is not finished, other than the ask made by
+        the current message itself (it is the message they just sent)."""
+        sender, current = state['sender'], state.get('current')
+        if any(a.sender == sender and a.id != current and a.state != 'closed' for a in self.ledger().asks()):
+            return True
+        return any(i.sender == sender and i.origin != 'message' and i.state not in ('done', 'dropped')
+                   for i in items.values())
+
     def _todo_block(self, block, session, **kwargs):
         state = self._turns[session]
-        if not state['private']:
-            instruction = "This chat is shared: do not name the user's todos or asks in your reply unless the user asks about them."
-            block = (block + '\n\n' if block else '') + instruction
         now, tz = todo_tools.clock(kwargs)
         read = TodoLog(self._data_dir()).read()
         items = fold(read.events)
+        if not state['private'] and self._has_open_items(state, items):
+            # Only when something could leak: a person with nothing stored gets exactly the ask block.
+            instruction = "This chat is shared: do not name the user's todos or asks in your reply unless the user asks about them."
+            block = (block + '\n\n' if block else '') + instruction
         todos = [i for i in items.values() if i.sender == state['sender'] and (i.origin != 'message' or i.category or i.due or i.snooze_until)]
         if not todos:
             return block

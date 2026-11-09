@@ -74,7 +74,8 @@ Not an audit of the agent's tool calls: it tracks what you asked and promised.
 On a shared gateway, every user sees and changes only their own asks and todos.
 In a group, channel or thread chat, everyone can read what the plugin adds, so
 there it shows counts only ("You have 1 todo due. /todos to see it."), posts no
-Open todos message, and asks the agent not to name your items. What you type
+Open todos message, and asks the agent not to name your asks or todos (only when
+you have asks or todos stored). What you type
 yourself (`/todos`, `/asks`) still shows your own list; other commands there
 name only the id ("Done: T3"). A chat whose type is unknown counts as shared.
 

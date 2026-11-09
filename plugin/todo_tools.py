@@ -37,14 +37,14 @@ def handle(plugin, name, args, **kwargs):
         if name == 'todo_add':
             try: due = resolve_due(args['due'], now, tz) if args.get('due') else ''
             except (ValueError, TypeError): return json.dumps({'ok': False, 'message': 'Due is today, tomorrow or YYYY-MM-DD'})
-            result = log.add_todo(sender, args.get('text', ''), origin='user' if args.get('at_user_request') and TodoLog._consented_words(args.get('user_words'), state['message']) else 'agent', category=args.get('category', ''), due=due, turn_key=state['turn'], agent_adds=plugin._cfg('agent_adds', True), **common)
+            result = log.add_todo(sender, args.get('text', ''), origin='user' if args.get('at_user_request') and TodoLog._consented_words(args.get('user_words'), state.get('consent_message')) else 'agent', category=args.get('category', ''), due=due, turn_key=state['turn'], agent_adds=plugin._cfg('agent_adds', True), **common)
         elif name == 'todo_list':
             items = fold(log.read().events)
             visible = [i for i in items.values() if i.sender == sender and _open(i)] if args.get('include_snoozed') else open_items(items, sender, now, tz)
             result = {'items': [dict(id=i.id, text=clean(i.text), category=clean(i.category), due=i.due, snooze_until=i.snooze_until) for i in visible]}
         else:
             ident = args.get('id', '')
-            base = dict(by='agent', how='words', turn_key=state['turn'], current_message=state['message'], shown_ids=state['shown'], user_words=args.get('user_words'), **common)
+            base = dict(by='agent', how='words', turn_key=state['turn'], current_message=state.get('consent_message'), shown_ids=state['shown'], user_words=args.get('user_words'), **common)
             if name == 'todo_suggest': result = log.apply_action(sender, ident, 'suggest', suggestion=args.get('action'), **base)
             else:
                 results = []
